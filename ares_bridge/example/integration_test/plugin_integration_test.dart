@@ -14,11 +14,13 @@ import 'package:ares_bridge/ares_bridge.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('getPlatformVersion test', (WidgetTester tester) async {
-    final AresBridge plugin = AresBridge();
-    final String? version = await plugin.getPlatformVersion();
-    // The version string depends on the host platform running the test, so
-    // just assert that some non-empty string is returned.
-    expect(version?.isNotEmpty, true);
+  testWidgets('validates a transfer request', (WidgetTester tester) async {
+    final request = AresFileTransferRequest(
+      sourcePath: '/tmp/example.txt',
+      destinationPath: 'example.txt',
+    );
+
+    expect(request.sourcePath, '/tmp/example.txt');
+    expect(request.destinationPath, 'example.txt');
   });
 }
