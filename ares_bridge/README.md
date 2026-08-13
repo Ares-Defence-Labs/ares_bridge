@@ -15,15 +15,16 @@ Every Flutter platform now registers the same method/event-channel API. Query
 | Platform | Role | Current transport |
 | --- | --- | --- |
 | Android | USB accessory | Implemented with `UsbManager`/`UsbAccessory` |
-| macOS | USB host | API registered; AOA/libusb transport not linked yet |
+| macOS | USB host | Implemented with Android Open Accessory and `IOUSBHost` |
 | Windows | USB host | API registered; AOA/WinUSB transport not linked yet |
 | Linux | USB host | API registered; AOA/libusb transport not linked yet |
 | iOS | — | Explicitly unsupported by the OS API |
 | Web | — | Explicitly unsupported as a portable background transport |
 
-Desktop host methods currently return `transport_unavailable` or
-`not_connected` rather than reporting false transfer success. Android performs
-real framed transfers once a compatible AOA host establishes the session.
+Unsupported desktop host methods return `transport_unavailable` or
+`not_connected` rather than reporting false transfer success. Android and
+macOS perform real framed transfers once an Android Open Accessory session is
+established.
 
 ## Usage
 
@@ -136,3 +137,18 @@ The Android backend:
 The on-wire protocol version is `1`. Frames use the `ARES` magic, version and
 message type bytes, a JSON header length, payload length, JSON header, and
 optional binary payload.
+
+## macOS transport
+
+The macOS backend:
+
+- polls the I/O Registry for a compatible Android device;
+- negotiates Android Open Accessory mode with product-neutral identity strings;
+- discovers the accessory interface's bulk input and output pipes;
+- streams the same versioned frames used by Android in both directions;
+- handles heartbeats, disconnects, cancellation, safe paths, collision policy,
+  byte-count validation, and SHA-256 verification;
+- uses only Apple system frameworks (`IOKit`, `IOUSBHost`, and `CryptoKit`).
+
+The host application must include the `com.apple.security.device.usb`
+entitlement when App Sandbox is enabled.

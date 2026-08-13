@@ -55,6 +55,7 @@ void main() {
       calls.single.arguments,
       containsPair('incomingDirectory', '/incoming'),
     );
+    expect(calls.single.arguments, containsPair('chunkSizeBytes', 64 * 1024));
   });
 
   test('decodes native capabilities', () async {
@@ -101,6 +102,25 @@ void main() {
     final progress = event as AresTransferProgress;
     expect(progress.fraction, 0.5);
     expect(progress.estimatedTimeRemaining, const Duration(seconds: 2));
+  });
+
+  test('decodes the requested destination for an incoming file', () {
+    final event = AresBridgeEvent.fromPlatformEvent(<String, Object?>{
+      'type': 'transferCompleted',
+      'transferId': 'transfer-2',
+      'direction': 'incoming',
+      'fileName': 'report.pdf',
+      'bytesTransferred': 2048,
+      'localPath': '/incoming/AresScan/Imports/report.pdf',
+      'destinationPath': 'AresScan/Imports/report.pdf',
+      'timestampMs': 1767225600000,
+    });
+
+    expect(event, isA<AresTransferCompleted>());
+    expect(
+      (event as AresTransferCompleted).destinationPath,
+      'AresScan/Imports/report.pdf',
+    );
   });
 
   test('rejects malformed platform events', () {

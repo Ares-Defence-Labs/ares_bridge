@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "ares_bridge",
     platforms: [
-        .macOS("10.15")
+        .macOS("10.15.4")
     ],
     products: [
         .library(name: "ares-bridge", targets: ["ares_bridge"])
@@ -30,6 +30,11 @@ let package = Package(
                 // If you have other resources that need to be bundled with your plugin, refer to
                 // the following instructions to add them:
                 // https://developer.apple.com/documentation/xcode/bundling-resources-with-a-swift-package
+            ],
+            linkerSettings: [
+                .linkedFramework("CryptoKit"),
+                .linkedFramework("IOKit"),
+                .linkedFramework("IOUSBHost")
             ]
         )
     ]

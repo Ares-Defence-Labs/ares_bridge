@@ -3,6 +3,7 @@ package com.example.ares_bridge
 import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -12,6 +13,7 @@ import java.io.EOFException
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.FilterInputStream
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
@@ -30,8 +32,18 @@ internal class AresAccessorySession(
 ) {
     private val descriptor: ParcelFileDescriptor =
         usbManager.openAccessory(accessory) ?: throw IOException("Unable to open USB accessory.")
+    // USB accessory descriptors require block reads but do not implement
+    // FileInputStream.available(). BufferedInputStream normally calls
+    // available() while refilling a partially consumed buffer, which raises
+    // EINVAL once a payload grows beyond that buffer. The wrapper preserves
+    // block reads while explicitly advertising no immediately available bytes;
+    // DataInputStream.readFully() then continues with normal blocking reads.
     private val input = DataInputStream(
-        BufferedInputStream(FileInputStream(descriptor.fileDescriptor)),
+        BufferedInputStream(
+            object : FilterInputStream(FileInputStream(descriptor.fileDescriptor)) {
+                override fun available(): Int = 0
+            },
+        ),
     )
     private val output = DataOutputStream(
         BufferedOutputStream(FileOutputStream(descriptor.fileDescriptor)),
@@ -39,24 +51,27 @@ internal class AresAccessorySession(
     private val executor = Executors.newCachedThreadPool()
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val running = AtomicBoolean(true)
+    private val heartbeatWriteInFlight = AtomicBoolean(false)
+    private val handshakeWriteInFlight = AtomicBoolean(false)
     private val writeLock = Any()
+    private val handshakeStateLock = Any()
     private val cancelledTransfers = ConcurrentHashMap.newKeySet<String>()
     private val incomingTransfers = ConcurrentHashMap<String, IncomingTransfer>()
     private val outgoingTransfers = ConcurrentHashMap<String, OutgoingTransfer>()
     private var heartbeatTask: ScheduledFuture<*>? = null
+    private var lastHostSessionMarker: String? = null
     @Volatile private var lastPeerHeartbeat = System.currentTimeMillis()
     @Volatile var isActive: Boolean = false
         private set
+    val isRunning: Boolean
+        get() = running.get()
 
     fun start() {
         executor.execute(::readLoop)
-        writeFrame(
-            TYPE_HELLO,
-            JSONObject()
-                .put("peerId", configuration.localPeerId)
-                .put("peerName", configuration.localPeerName),
-        )
-        writeFrame(TYPE_READY, JSONObject())
+        // USB stream writes may wait for the host's bulk IN request. Never run
+        // the initial handshake on Flutter's platform thread, where it would
+        // block route navigation and make the Android UI appear frozen.
+        writeHandshakeAsync()
         heartbeatTask = scheduler.scheduleAtFixedRate(
             ::heartbeat,
             configuration.heartbeatIntervalMs,
@@ -84,6 +99,7 @@ internal class AresAccessorySession(
                 sendFileBytes(transferId, source, destinationPath, metadata)
             } catch (error: Exception) {
                 outgoingTransfers.remove(transferId)
+                Log.e(LOG_TAG, "USB outgoing transfer failed: ${source.name}", error)
                 emitFailure(
                     transferId,
                     "outgoing",
@@ -183,6 +199,10 @@ internal class AresAccessorySession(
         try {
             while (running.get()) {
                 val frame = readFrame()
+                // Any valid protocol frame proves that the peer is alive. A
+                // large transfer must not time out merely because heartbeats
+                // are queued behind file data.
+                lastPeerHeartbeat = System.currentTimeMillis()
                 when (frame.type) {
                     TYPE_HELLO -> handleHello(frame.header)
                     TYPE_READY -> handleReady()
@@ -195,10 +215,12 @@ internal class AresAccessorySession(
                     else -> throw IOException("Unknown Ares frame type ${frame.type}.")
                 }
             }
-        } catch (_: EOFException) {
+        } catch (error: EOFException) {
+            Log.w(LOG_TAG, "USB peer closed the accessory stream", error)
             disconnect()
         } catch (error: Exception) {
             if (running.get()) {
+                Log.e(LOG_TAG, "USB accessory read loop failed", error)
                 emitConnection("failed", error.message)
                 disconnect()
             }
@@ -216,6 +238,51 @@ internal class AresAccessorySession(
                 "timestampMs" to System.currentTimeMillis(),
             ),
         )
+
+        // Android can keep the accessory descriptor open while the host app is
+        // restarted. Each host session includes a new sessionId, so reply once
+        // per session rather than flooding the data pipe for duplicate HELLOs.
+        // Never write the reply from the read loop. The host can still be
+        // sending READY and needs this loop to continue draining that frame.
+        val sessionMarker = header.optString("sessionId")
+            .takeIf { it.isNotEmpty() }
+            ?: header.optString("peerId").takeIf { it.isNotEmpty() }
+            ?: "legacy-host"
+        val shouldReply = synchronized(handshakeStateLock) {
+            if (lastHostSessionMarker == sessionMarker) {
+                false
+            } else {
+                lastHostSessionMarker = sessionMarker
+                true
+            }
+        }
+        if (shouldReply) writeHandshakeAsync()
+    }
+
+    private fun writeHandshakeAsync() {
+        if (!handshakeWriteInFlight.compareAndSet(false, true)) return
+        executor.execute {
+            try {
+                writeHandshake()
+            } catch (error: Exception) {
+                if (running.get()) {
+                    emitConnection("failed", error.message)
+                    disconnect()
+                }
+            } finally {
+                handshakeWriteInFlight.set(false)
+            }
+        }
+    }
+
+    private fun writeHandshake() {
+        writeFrame(
+            TYPE_HELLO,
+            JSONObject()
+                .put("peerId", configuration.localPeerId)
+                .put("peerName", configuration.localPeerName),
+        )
+        writeFrame(TYPE_READY, JSONObject())
     }
 
     private fun handleReady() {
@@ -244,6 +311,7 @@ internal class AresAccessorySession(
             totalBytes = totalBytes,
             temporary = temporary,
             destination = finalDestination,
+            destinationPath = destinationPath,
         )
         emitProgress(
             transferId,
@@ -313,6 +381,7 @@ internal class AresAccessorySession(
                     "bytesTransferred" to transfer.bytesTransferred,
                     "localPath" to transfer.destination.absolutePath,
                     "remotePath" to null,
+                    "destinationPath" to transfer.destinationPath,
                     "sha256" to actualHash,
                     "timestampMs" to System.currentTimeMillis(),
                 ),
@@ -382,10 +451,19 @@ internal class AresAccessorySession(
             disconnect()
             return
         }
-        try {
-            writeFrame(TYPE_HEARTBEAT, JSONObject())
-        } catch (_: Exception) {
-            disconnect()
+        if (!isActive || !heartbeatWriteInFlight.compareAndSet(false, true)) return
+
+        // A USB accessory write can legitimately wait while the desktop host is
+        // not issuing bulk-IN requests. Keep that wait away from the watchdog
+        // scheduler so peer timeout detection and descriptor recovery continue.
+        executor.execute {
+            try {
+                writeFrame(TYPE_HEARTBEAT, JSONObject())
+            } catch (_: Exception) {
+                disconnect()
+            } finally {
+                heartbeatWriteInFlight.set(false)
+            }
         }
     }
 
@@ -401,6 +479,9 @@ internal class AresAccessorySession(
             output.write(headerBytes)
             output.write(payload)
             output.flush()
+            if (isDiagnosticFrame(type)) {
+                Log.i(LOG_TAG, "USB TX frame type=$type bytes=${18 + headerBytes.size + payload.size}")
+            }
         }
     }
 
@@ -418,6 +499,9 @@ internal class AresAccessorySession(
         input.readFully(headerBytes)
         val payload = ByteArray(payloadLength.toInt())
         input.readFully(payload)
+        if (isDiagnosticFrame(type)) {
+            Log.i(LOG_TAG, "USB RX frame type=$type bytes=${18 + headerLength + payload.size}")
+        }
         return Frame(type, JSONObject(String(headerBytes, Charsets.UTF_8)), payload)
     }
 
@@ -429,6 +513,17 @@ internal class AresAccessorySession(
             throw IOException("Destination escapes the configured incoming directory.")
         }
         return destination.canonicalFile
+    }
+
+    private fun isDiagnosticFrame(type: Int): Boolean = when (type) {
+        TYPE_HELLO,
+        TYPE_READY,
+        TYPE_FILE_BEGIN,
+        TYPE_FILE_END,
+        TYPE_FILE_ACK,
+        TYPE_FILE_ERROR,
+        -> true
+        else -> false
     }
 
     private fun resolveCollision(requested: File): File {
@@ -536,16 +631,19 @@ internal class AresAccessorySession(
         heartbeatTask?.cancel(true)
         incomingTransfers.values.forEach(IncomingTransfer::abort)
         incomingTransfers.clear()
+        // Close the descriptor first. Closing BufferedOutputStream attempts a
+        // final flush, which can otherwise wait indefinitely after the Mac host
+        // exits and keep the session's write lock occupied during reconnect.
+        try {
+            descriptor.close()
+        } catch (_: Exception) {
+        }
         try {
             input.close()
         } catch (_: Exception) {
         }
         try {
             output.close()
-        } catch (_: Exception) {
-        }
-        try {
-            descriptor.close()
         } catch (_: Exception) {
         }
         scheduler.shutdownNow()
@@ -566,6 +664,7 @@ internal class AresAccessorySession(
         val totalBytes: Long,
         val temporary: File,
         val destination: File,
+        val destinationPath: String,
     ) {
         val startedAtMs: Long = System.currentTimeMillis()
         private val output = FileOutputStream(temporary)
@@ -580,7 +679,9 @@ internal class AresAccessorySession(
         }
 
         fun finish(): String {
-            output.fd.sync()
+            // close() flushes the file before it is renamed. A durable fsync is
+            // unnecessary here because SHA-256 was computed while streaming,
+            // and it can turn a tiny USB transfer into a multi-second stall.
             output.close()
             return digest.digest().toHex()
         }
@@ -595,6 +696,7 @@ internal class AresAccessorySession(
     }
 
     companion object {
+        private const val LOG_TAG = "UsbBridge"
         private const val MAGIC = 0x41524553
         private const val PROTOCOL_VERSION = 1
         private const val MAX_HEADER_BYTES = 1024 * 1024

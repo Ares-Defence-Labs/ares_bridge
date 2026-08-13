@@ -5,9 +5,9 @@
 Pod::Spec.new do |s|
   s.name             = 'ares_bridge'
   s.version          = '0.0.1'
-  s.summary          = 'A new Flutter plugin project.'
+  s.summary          = 'Cross-platform USB discovery and file transfer for Flutter.'
   s.description      = <<-DESC
-A new Flutter plugin project.
+Product-neutral USB peer discovery, sessions, and bidirectional file transfer.
                        DESC
   s.homepage         = 'http://example.com'
   s.license          = { :file => '../LICENSE' }
@@ -23,8 +23,9 @@ A new Flutter plugin project.
   # s.resource_bundles = {'ares_bridge_privacy' => ['ares_bridge/Sources/ares_bridge/PrivacyInfo.xcprivacy']}
 
   s.dependency 'FlutterMacOS'
+  s.frameworks = 'CryptoKit', 'IOKit', 'IOUSBHost'
 
-  s.platform = :osx, '10.11'
+  s.platform = :osx, '10.15.4'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
   s.swift_version = '5.0'
 end

@@ -3,8 +3,9 @@ import FlutterMacOS
 
 public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
-  private var initialized = false
-  private var localRole = "usbHost"
+  private lazy var transport = UsbHostTransport { [weak self] event in
+    self?.emit(event)
+  }
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = AresBridgePlugin()
@@ -19,50 +20,55 @@ public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandl
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-    switch call.method {
-    case "getCapabilities":
-      result([
-        "platform": "macos",
-        "isSupported": false,
-        "supportsUsbHost": true,
-        "supportsUsbAccessory": false,
-        "supportsBidirectionalTransfer": false,
-        "reason": "The macOS AOA/libusb host transport has not been linked yet.",
-      ])
-    case "initialize":
-      guard let arguments = call.arguments as? [String: Any] else {
-        result(error("invalid_argument", "initialize expects a configuration map."))
-        return
+    do {
+      switch call.method {
+      case "getCapabilities":
+        result([
+          "platform": "macos",
+          "isSupported": true,
+          "supportsUsbHost": true,
+          "supportsUsbAccessory": false,
+          "supportsBidirectionalTransfer": true,
+        ])
+      case "initialize":
+        guard let arguments = call.arguments as? [String: Any] else {
+          throw UsbHostError.invalidConfiguration(
+            "initialize expects a configuration map.")
+        }
+        try transport.initialize(arguments: arguments)
+        result(nil)
+      case "startListening":
+        try transport.startListening()
+        result(nil)
+      case "stopListening":
+        transport.stop()
+        result(nil)
+      case "sendFile":
+        guard let request = call.arguments as? [String: Any] else {
+          throw UsbHostError.invalidTransfer("sendFile expects a transfer map.")
+        }
+        result(try transport.sendFile(request))
+      case "sendFiles":
+        guard let requests = call.arguments as? [[String: Any]] else {
+          throw UsbHostError.invalidTransfer("sendFiles expects transfer maps.")
+        }
+        result(try transport.sendFiles(requests))
+      case "cancelTransfer":
+        guard let arguments = call.arguments as? [String: Any],
+              let transferId = arguments["transferId"] as? String,
+              !transferId.isEmpty else {
+          throw UsbHostError.invalidTransfer("cancelTransfer requires a transferId.")
+        }
+        transport.cancelTransfer(transferId)
+        result(nil)
+      case "dispose":
+        transport.stop()
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
       }
-      let requestedRole = arguments["role"] as? String ?? "automatic"
-      guard requestedRole != "usbAccessory" else {
-        result(error("unsupported_role", "macOS must be the USB host for Android Open Accessory."))
-        return
-      }
-      localRole = "usbHost"
-      initialized = true
-      result(nil)
-    case "startListening":
-      guard initialized else {
-        result(error("not_initialized", "Call initialize before startListening."))
-        return
-      }
-      emitConnection("listening")
-      emitConnection(
-        "failed",
-        message: "The macOS AOA/libusb host transport has not been linked yet.")
-      result(error(
-        "transport_unavailable",
-        "The macOS AOA/libusb host transport has not been linked yet."))
-    case "stopListening", "dispose":
-      emitConnection("stopped")
-      result(nil)
-    case "sendFile", "sendFiles":
-      result(error("not_connected", "No active Ares USB peer."))
-    case "cancelTransfer":
-      result(nil)
-    default:
-      result(FlutterMethodNotImplemented)
+    } catch {
+      result(flutterError(error))
     }
   }
 
@@ -79,20 +85,24 @@ public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandl
     return nil
   }
 
-  private func emitConnection(_ state: String, message: String? = nil) {
-    var event: [String: Any] = [
-      "type": "connection",
-      "state": state,
-      "localRole": localRole,
-      "timestampMs": Int64(Date().timeIntervalSince1970 * 1000),
-    ]
-    if let message {
-      event["message"] = message
+  private func emit(_ event: [String: Any?]) {
+    let platformEvent = event.compactMapValues { $0 }
+    DispatchQueue.main.async { [weak self] in
+      self?.eventSink?(platformEvent)
     }
-    eventSink?(event)
   }
 
-  private func error(_ code: String, _ message: String) -> FlutterError {
-    FlutterError(code: code, message: message, details: nil)
+  private func flutterError(_ error: Error) -> FlutterError {
+    let code: String
+    switch error {
+    case UsbHostError.invalidConfiguration: code = "invalid_configuration"
+    case UsbHostError.invalidTransfer: code = "invalid_transfer"
+    case UsbHostError.notConnected: code = "not_connected"
+    case UsbHostError.protocolViolation: code = "protocol_error"
+    default: code = "usb_transport_error"
+    }
+    let message = (error as? LocalizedError)?.errorDescription
+      ?? error.localizedDescription
+    return FlutterError(code: code, message: message, details: nil)
   }
 }

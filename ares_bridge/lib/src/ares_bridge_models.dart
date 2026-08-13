@@ -49,7 +49,7 @@ final class AresBridgeConfiguration {
     this.localPeerName,
     this.incomingDirectory,
     this.overwritePolicy = AresOverwritePolicy.rename,
-    this.chunkSizeBytes = 1024 * 1024,
+    this.chunkSizeBytes = 64 * 1024,
     this.heartbeatInterval = const Duration(seconds: 2),
     this.peerTimeout = const Duration(seconds: 8),
   }) : assert(chunkSizeBytes > 0);
@@ -271,6 +271,7 @@ final class AresTransferCompleted extends AresBridgeEvent {
     required super.timestamp,
     this.localPath,
     this.remotePath,
+    this.destinationPath,
     this.sha256,
   });
 
@@ -286,6 +287,7 @@ final class AresTransferCompleted extends AresBridgeEvent {
       bytesTransferred: _requiredInt(map, 'bytesTransferred'),
       localPath: _optionalString(map, 'localPath'),
       remotePath: _optionalString(map, 'remotePath'),
+      destinationPath: _optionalString(map, 'destinationPath'),
       sha256: _optionalString(map, 'sha256'),
       timestamp: _timestamp(map),
     );
@@ -300,6 +302,9 @@ final class AresTransferCompleted extends AresBridgeEvent {
   final String? localPath;
 
   final String? remotePath;
+
+  /// Relative destination requested by the sender for an incoming transfer.
+  final String? destinationPath;
   final String? sha256;
 }
 
