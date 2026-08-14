@@ -21,13 +21,13 @@ event semantics, protocol details, and troubleshooting.
 
 ## Quick start
 
-```yaml
-dependencies:
-  ares_bridge:
-    path: ../ares_bridge/ares_bridge
+```console
+flutter pub add ares_bridge
 ```
 
 ```dart
+import 'package:ares_bridge/ares_bridge.dart';
+
 final bridge = AresBridge();
 final capabilities = await bridge.getCapabilities();
 

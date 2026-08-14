@@ -5,12 +5,10 @@ homepage: https://aresdefencelabs.com/
 repository: https://github.com/Ares-Defence-Labs/ares_bridge
 issue_tracker: https://github.com/Ares-Defence-Labs/ares_bridge/issues
 documentation: https://github.com/Ares-Defence-Labs/ares_bridge/tree/main/ares_bridge/doc
-publish_to: https://pub.dev
 
 topics:
   - usb
   - file-transfer
-  - flutter-plugin
   - android
   - macos
   - ios

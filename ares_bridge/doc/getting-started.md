@@ -6,12 +6,17 @@ release resources.
 
 ## 1. Add the package
 
-For a local checkout:
+Install the published package:
+
+```console
+flutter pub add ares_bridge
+```
+
+Or add it manually to `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  ares_bridge:
-    path: ../ares_bridge
+  ares_bridge: ^0.0.1
 ```
 
 Then resolve dependencies:
