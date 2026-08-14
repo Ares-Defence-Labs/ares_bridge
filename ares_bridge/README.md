@@ -1,156 +1,133 @@
-# ares_bridge
+# Ares Bridge
 
-Cross-platform USB peer discovery and bidirectional file transfer for Flutter.
+USB peer discovery and checksum-verified, bidirectional file transfer for
+Flutter.
 
-The Dart API is shared by Windows, macOS, and Android. Native transport
-backends are implemented behind `AresBridgePlatform`, so applications do not
-need platform branches for connection, progress, completion, or failure
-handling.
+Ares Bridge gives Flutter applications one typed Dart API across desktop host
+and mobile accessory roles. It handles peer readiness, handshakes, heartbeats,
+streamed file transfer, safe destination paths, collision policy, SHA-256
+verification, and terminal acknowledgements behind platform-neutral streams.
 
-## API status
+> **Implementation status:** Android, macOS, and the macOS↔iOS physical USB
+> path are implemented. Windows and Linux register the API but do not yet link
+> a native transport. Web supports capability detection only.
 
-Every Flutter platform now registers the same method/event-channel API. Query
-`getCapabilities()` before presenting USB controls:
+## Documentation
 
-| Platform | Role | Current transport |
-| --- | --- | --- |
-| Android | USB accessory | Implemented with `UsbManager`/`UsbAccessory` |
-| macOS | USB host | Android Open Accessory via `IOUSBHost`; paired iOS devices via usbmuxd |
-| Windows | USB host | API registered; AOA/WinUSB transport not linked yet |
-| Linux | USB host | API registered; AOA/libusb transport not linked yet |
-| iOS | USB accessory | Foreground loopback listener reached through macOS usbmuxd |
-| Web | — | Explicitly unsupported as a portable background transport |
+| Guide | Use it for |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Installation and a complete lifecycle example |
+| [API reference](docs/api-reference.md) | Every public type, method, field, and enum |
+| [Platform setup](docs/platform-setup.md) | Android, macOS, iOS, Windows, Linux, and web notes |
+| [Events and errors](docs/events-and-errors.md) | State transitions, terminal events, and error handling |
+| [Platform channel contract](docs/platform-channel-contract.md) | Native backend method and event schemas |
+| [Protocol and security](docs/protocol-and-security.md) | Wire frames, verification, filesystem safety, and trust boundary |
+| [Troubleshooting](docs/troubleshooting.md) | Symptoms, causes, and practical checks |
 
-Unsupported desktop host methods return `transport_unavailable` or
-`not_connected` rather than reporting false transfer success. Android uses
-Android Open Accessory. iOS uses a loopback-only foreground listener that the
-macOS host reaches through the paired device's physical usbmuxd tunnel.
-The iOS path filters out network-attached devices and the mobile listener binds
-only to loopback, so application data remains on the physical USB cable.
+Run `dart doc` in this directory for browsable HTML generated directly from
+the source-level API comments.
 
-## Usage
+## Platform support
+
+| Platform | Natural role | Discovery / transport | Current support |
+| --- | --- | --- | --- |
+| Android | USB accessory | `UsbManager` + Android Open Accessory | Full bidirectional transfer |
+| macOS | USB host | `IOUSBHost` (Android), usbmuxd (paired iOS) | Full bidirectional transfer |
+| iOS | USB accessory | Foreground loopback listener tunneled by usbmuxd | Full while app is foreground |
+| Windows | USB host | API registered; WinUSB/AOA not linked | Capability and explicit errors |
+| Linux | USB host | API registered; libusb/AOA not linked | Capability and explicit errors |
+| Web | — | No portable background AOA transport | Capability reporting only |
+
+Always call `getCapabilities()` before showing transfer controls.
+
+## Quick start
 
 ```dart
+import 'dart:async';
+
+import 'package:ares_bridge/ares_bridge.dart';
+import 'package:flutter/services.dart';
+
 final bridge = AresBridge();
+final subscriptions = <StreamSubscription<Object?>>[];
 
-final capabilities = await bridge.getCapabilities();
-if (!capabilities.isSupported) {
-  print(capabilities.reason);
-  return;
+Future<void> startBridge() async {
+  final capabilities = await bridge.getCapabilities();
+  if (!capabilities.isSupported) {
+    throw UnsupportedError(capabilities.reason ?? 'USB transfer unavailable');
+  }
+
+  subscriptions.add(
+    bridge.connectionEvents.listen((event) {
+      print('Connection: ${event.state.name}');
+    }),
+  );
+  subscriptions.add(
+    bridge.transferProgress.listen((event) {
+      print('${event.fileName}: ${(event.fraction * 100).toStringAsFixed(1)}%');
+    }),
+  );
+  subscriptions.add(
+    bridge.receivedFiles.listen((event) {
+      print('Verified file: ${event.localPath}');
+    }),
+  );
+  subscriptions.add(
+    bridge.failedTransfers.listen((event) {
+      print('${event.code}: ${event.message}');
+    }),
+  );
+
+  try {
+    await bridge.initialize(
+      const AresBridgeConfiguration(
+        role: AresBridgeRole.automatic,
+        localPeerName: 'Warehouse device',
+      ),
+    );
+    await bridge.startListening();
+  } on PlatformException catch (error) {
+    print('${error.code}: ${error.message}');
+    rethrow;
+  }
 }
+```
 
-await bridge.initialize(
-  const AresBridgeConfiguration(
-    role: AresBridgeRole.automatic,
-    localPeerName: 'Warehouse Mac',
-    incomingDirectory: null,
+Send only after the connection reaches `AresConnectionState.active`:
+
+```dart
+final transferId = await bridge.sendFile(
+  AresFileTransferRequest(
+    sourcePath: '/absolute/path/report.pdf',
+    destinationPath: 'reports/report.pdf',
+    metadata: const {'origin': 'drag-drop'},
   ),
 );
-
-bridge.connectionEvents.listen((event) {
-  switch (event.state) {
-    case AresConnectionState.peerReady:
-      // The remote receiver announced that it is listening.
-    case AresConnectionState.active:
-      // Handshake complete and heartbeat current.
-    default:
-      break;
-  }
-});
-
-bridge.transferProgress.listen((event) {
-  print('${event.fileName}: ${event.fraction * 100}%');
-  print('ETA: ${event.estimatedTimeRemaining}');
-});
-
-bridge.receivedFiles.listen((event) {
-  // Fired only after a received file has been closed and verified.
-  print('Received ${event.fileName} at ${event.localPath}');
-});
-
-await bridge.startListening();
 ```
 
-Queue paths from a desktop drag-and-drop target:
+`sendFile` and `sendFiles` return when native code accepts the work—not when
+the receiver has persisted it. Match `transferId` against `completedTransfers`
+or `failedTransfers` for the terminal result.
 
-```dart
-final transferIds = await bridge.sendFiles([
-  for (final path in droppedPaths)
-    AresFileTransferRequest(
-      sourcePath: path,
-      metadata: const {'origin': 'drag-drop'},
-    ),
-]);
-```
+## Core guarantees
 
-`sendFile` and `sendFiles` return after the native layer accepts the work, not
-after the bytes arrive. Observe `completedTransfers`, `receivedFiles`, and
-`failedTransfers` for terminal results.
+- A cable attachment alone is never reported as an active connection.
+- Incoming paths are constrained to the configured destination directory.
+- File bytes are first written to a hidden partial file.
+- Completion follows flush, close, byte-count validation, and SHA-256
+  verification.
+- The sender completes only after the receiver acknowledges verified storage.
+- All typed event streams are broadcast streams.
 
-## Connection semantics
+## Requirements
 
-The bridge distinguishes these states:
+- Dart `^3.12.2`
+- Flutter `>=3.3.0`
+- iOS 13.0 or later
+- macOS 10.15.4 or later
 
-- `listening`: the local receiver is accepting a peer.
-- `peerReady`: the remote receiver announced that it is listening.
-- `active`: handshake completed and peer heartbeats are current.
-- `disconnected`: a previously known peer is no longer active.
-- `failed`: the connection failed; `message` may contain diagnostics.
+See [Platform setup](docs/platform-setup.md) before integrating a native build.
 
-A cable attachment alone is not considered an active connection.
+## License
 
-## Event channel contract
-
-Native backends publish maps on `ares_bridge/events`. Every map has `type` and
-UTC `timestampMs`. Supported types are:
-
-- `connection`
-- `transferProgress`
-- `transferCompleted`
-- `transferFailed`
-
-Commands are received on `ares_bridge/methods`:
-
-- `initialize`
-- `startListening`
-- `stopListening`
-- `sendFile`
-- `sendFiles`
-- `cancelTransfer`
-- `dispose`
-
-Transfer completion must only be emitted after the destination is flushed and
-closed. If a checksum is negotiated, it must also be verified first.
-
-## Android transport
-
-The Android backend:
-
-- detects accessory attachment and detachment;
-- requests USB accessory permission;
-- announces peer readiness and maintains heartbeats;
-- streams files in configured chunks in either direction;
-- writes incoming data to a hidden `.part` file;
-- prevents destination traversal outside `incomingDirectory`;
-- verifies the final byte count and SHA-256 checksum;
-- atomically exposes the destination and then emits `receivedFiles`;
-- acknowledges receipt before the sender emits completion.
-
-The on-wire protocol version is `1`. Frames use the `ARES` magic, version and
-message type bytes, a JSON header length, payload length, JSON header, and
-optional binary payload.
-
-## macOS transport
-
-The macOS backend:
-
-- polls the I/O Registry for a compatible Android device;
-- negotiates Android Open Accessory mode with product-neutral identity strings;
-- discovers the accessory interface's bulk input and output pipes;
-- streams the same versioned frames used by Android in both directions;
-- handles heartbeats, disconnects, cancellation, safe paths, collision policy,
-  byte-count validation, and SHA-256 verification;
-- uses only Apple system frameworks (`IOKit`, `IOUSBHost`, and `CryptoKit`).
-
-The host application must include the `com.apple.security.device.usb`
-entitlement when App Sandbox is enabled.
+See [LICENSE](LICENSE).

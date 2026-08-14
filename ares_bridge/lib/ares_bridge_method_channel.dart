@@ -5,6 +5,9 @@ import 'ares_bridge_platform_interface.dart';
 import 'src/ares_bridge_models.dart';
 
 /// Default platform implementation backed by Flutter channels.
+///
+/// Commands use `ares_bridge/methods`; native event maps arrive on the
+/// broadcast channel `ares_bridge/events` and are decoded into typed events.
 class MethodChannelAresBridge extends AresBridgePlatform {
   @visibleForTesting
   final methodChannel = const MethodChannel('ares_bridge/methods');

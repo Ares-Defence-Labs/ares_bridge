@@ -11,8 +11,10 @@ import 'src/ares_bridge_models.dart';
 /// transport. The API remains available so applications can query capabilities
 /// and present a useful message instead of failing plugin registration.
 class AresBridgeWeb extends AresBridgePlatform {
+  /// Creates the capability-reporting web backend.
   AresBridgeWeb();
 
+  /// Registers the web backend with Flutter.
   static void registerWith(Registrar registrar) {
     AresBridgePlatform.instance = AresBridgeWeb();
   }

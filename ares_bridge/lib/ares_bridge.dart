@@ -1,3 +1,7 @@
+/// Cross-platform USB peer discovery and verified file transfer for Flutter.
+///
+/// Create an [AresBridge], query [AresBridge.getCapabilities], initialize it,
+/// and subscribe to event streams before calling [AresBridge.startListening].
 library;
 
 import 'ares_bridge_platform_interface.dart';
@@ -11,6 +15,9 @@ export 'src/ares_bridge_models.dart';
 /// exposes transport-neutral events so the same application code can run on a
 /// USB host (Windows or macOS) and a USB accessory (Android).
 class AresBridge {
+  /// Creates a bridge using the registered platform backend.
+  ///
+  /// Supplying [platform] is intended for tests and custom platform backends.
   AresBridge({AresBridgePlatform? platform})
     : _platform = platform ?? AresBridgePlatform.instance;
 
@@ -52,6 +59,10 @@ class AresBridge {
       events.where((event) => event is AresTransferFailed).cast();
 
   /// Configures the bridge before it starts listening or sending.
+  ///
+  /// Call this once before [startListening]. Calling it again replaces the
+  /// native configuration; stop active work first when changing settings.
+  /// Invalid values are reported as a platform `PlatformException`.
   Future<void> initialize([
     AresBridgeConfiguration configuration = const AresBridgeConfiguration(),
   ]) {
@@ -59,20 +70,32 @@ class AresBridge {
   }
 
   /// Reports the USB roles and transfer features available on this platform.
+  ///
+  /// This is safe to call before [initialize]. Use it to hide unsupported UI
+  /// and display [AresBridgeCapabilities.reason] to the user.
   Future<AresBridgeCapabilities> getCapabilities() {
     return _platform.getCapabilities();
   }
 
   /// Starts listening for a peer using the role supplied to [initialize].
+  ///
+  /// The future completes after listening is requested, not after a peer is
+  /// connected. Wait for an [AresConnectionState.active] event before sending.
+  /// Calling this before [initialize] fails with `not_initialized`.
   Future<void> startListening() => _platform.startListening();
 
   /// Stops accepting new peers without disposing the bridge.
+  ///
+  /// This closes the current native session and emits
+  /// [AresConnectionState.stopped]. Call [startListening] to resume.
   Future<void> stopListening() => _platform.stopListening();
 
   /// Sends one local file and returns its transfer identifier.
   ///
   /// Completion is asynchronous and is reported through
   /// [completedTransfers]. Progress is reported through [transferProgress].
+  /// The returned future completes when the native backend accepts the request.
+  /// It does not mean that the peer has received or verified the file.
   Future<String> sendFile(AresFileTransferRequest request) {
     return _platform.sendFile(request);
   }
@@ -80,6 +103,7 @@ class AresBridge {
   /// Queues several files, such as paths received from desktop drag and drop.
   ///
   /// The returned identifiers correspond to [requests] by index.
+  /// An empty request list returns an empty list without calling the backend.
   Future<List<String>> sendFiles(List<AresFileTransferRequest> requests) {
     if (requests.isEmpty) {
       return Future<List<String>>.value(const <String>[]);
@@ -88,6 +112,10 @@ class AresBridge {
   }
 
   /// Cancels an active or queued transfer.
+  ///
+  /// Throws [ArgumentError] synchronously when [transferId] is empty. A
+  /// cancelled transfer is terminal and may produce an [AresTransferFailed]
+  /// event depending on how far it progressed.
   Future<void> cancelTransfer(String transferId) {
     if (transferId.isEmpty) {
       throw ArgumentError.value(transferId, 'transferId', 'Must not be empty.');
@@ -96,5 +124,8 @@ class AresBridge {
   }
 
   /// Releases the native USB session and its resources.
+  ///
+  /// Cancel stream subscriptions before calling this. A disposed instance
+  /// should not be reused; create another [AresBridge] to start again.
   Future<void> dispose() => _platform.dispose();
 }
