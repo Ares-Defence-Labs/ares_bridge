@@ -3,7 +3,7 @@ import FlutterMacOS
 
 public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
-  private lazy var transport = UsbHostTransport { [weak self] event in
+  private lazy var transport = CompositeUsbHostTransport { [weak self] event in
     self?.emit(event)
   }
 

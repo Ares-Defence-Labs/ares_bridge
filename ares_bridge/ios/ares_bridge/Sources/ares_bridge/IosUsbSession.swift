@@ -1,8 +1,7 @@
 import CryptoKit
 import Foundation
-import IOUSBHost
 
-final class UsbHostSession {
+final class IosUsbSession {
   typealias EventHandler = ([String: Any?]) -> Void
 
   private struct Frame {
@@ -25,7 +24,7 @@ final class UsbHostSession {
     let temporaryURL: URL
     let destinationURL: URL
     let destinationPath: String
-    let startedAtMs = UsbHostSession.nowMs()
+    let startedAtMs = IosUsbSession.nowMs()
     private let handle: FileHandle
     private var hasher = SHA256()
     private(set) var transferredBytes: Int64 = 0
@@ -67,13 +66,13 @@ final class UsbHostSession {
     }
   }
 
-  private let byteTransport: UsbSessionByteTransport
-  private let configuration: UsbHostConfiguration
+  private let byteTransport: IosSessionByteTransport
+  private let configuration: IosUsbConfiguration
   private let eventHandler: EventHandler
   private let disconnectedHandler: () -> Void
-  private let readQueue = DispatchQueue(label: "usb.bridge.macos.read")
+  private let readQueue = DispatchQueue(label: "usb.bridge.ios.read")
   private let transferQueue = DispatchQueue(
-    label: "usb.bridge.macos.transfers",
+    label: "usb.bridge.ios.transfers",
     attributes: .concurrent
   )
   private let writeLock = NSLock()
@@ -98,30 +97,12 @@ final class UsbHostSession {
     18 + UsbWireProtocol.maxHeaderBytes + UsbWireProtocol.maxPayloadBytes
 
   init(
-    interface: IOUSBHostInterface,
-    inputPipe: IOUSBHostPipe,
-    outputPipe: IOUSBHostPipe,
-    configuration: UsbHostConfiguration,
-    eventHandler: @escaping EventHandler,
-    disconnectedHandler: @escaping () -> Void
-  ) {
-    byteTransport = AndroidUsbPipeByteTransport(
-      interface: interface,
-      inputPipe: inputPipe,
-      outputPipe: outputPipe
-    )
-    self.configuration = configuration
-    self.eventHandler = eventHandler
-    self.disconnectedHandler = disconnectedHandler
-  }
-
-  init(
-    usbMuxSocket descriptor: Int32,
-    configuration: UsbHostConfiguration,
+    socket descriptor: Int32,
+    configuration: IosUsbConfiguration,
     eventHandler: @escaping EventHandler,
     disconnectedHandler: @escaping () -> Void
   ) throws {
-    byteTransport = try UsbMuxSocketByteTransport(descriptor: descriptor)
+    byteTransport = try IosLoopbackSocketByteTransport(descriptor: descriptor)
     self.configuration = configuration
     self.eventHandler = eventHandler
     self.disconnectedHandler = disconnectedHandler
@@ -132,7 +113,7 @@ final class UsbHostSession {
   }
 
   func start() {
-    // Drain Android's IN endpoint before sending the handshake. Both peers can
+    // Start receiving before sending the handshake before sending the handshake. Both peers can
     // send HELLO at the same time; starting reads after both writes creates a
     // bulk-pipe deadlock when each side is waiting for the other to drain.
     readQueue.async { [weak self] in self?.readLoop() }
@@ -158,15 +139,15 @@ final class UsbHostSession {
   }
 
   func sendFile(_ request: [String: Any]) throws -> String {
-    guard isActive else { throw UsbHostError.notConnected }
+    guard isActive else { throw IosUsbError.notConnected }
     guard let sourcePath = request["sourcePath"] as? String,
           !sourcePath.isEmpty else {
-      throw UsbHostError.invalidTransfer("sourcePath is required.")
+      throw IosUsbError.invalidTransfer("sourcePath is required.")
     }
     let sourceURL = URL(fileURLWithPath: sourcePath)
     let attributes = try FileManager.default.attributesOfItem(atPath: sourceURL.path)
     guard attributes[.type] as? FileAttributeType == .typeRegular else {
-      throw UsbHostError.invalidTransfer("Source file does not exist: \(sourcePath)")
+      throw IosUsbError.invalidTransfer("Source file does not exist: \(sourcePath)")
     }
     let fileName = sourceURL.lastPathComponent
     let totalBytes = (attributes[.size] as? NSNumber)?.int64Value ?? 0
@@ -236,7 +217,7 @@ final class UsbHostSession {
     stateLock.withLock { lastPeerHeartbeatMs = Self.nowMs() }
     switch frame.type {
     case UsbWireProtocol.hello:
-      // Android can send its startup HELLO and another HELLO in response to the
+      // The host can send its startup HELLO and another HELLO in response to the
       // host handshake. A duplicate HELLO after READY must not downgrade the
       // product UI from active back to connecting.
       let connectionState = stateLock.withLock { active ? "active" : "peerReady" }
@@ -254,7 +235,7 @@ final class UsbHostSession {
       }
       if becameActive { emitConnection("active") }
     case UsbWireProtocol.heartbeat:
-      // The Android accessory descriptor can outlive a restarted host app. In
+      // A forwarded USB socket can outlive an interrupted handshake. In
       // that case its one-time READY may have been consumed by the old host,
       // but a valid framed heartbeat proves the replacement session is live.
       let becameActive = stateLock.withLock { () -> Bool in
@@ -275,7 +256,7 @@ final class UsbHostSession {
     case UsbWireProtocol.fileError:
       handleFileError(frame.header)
     default:
-      throw UsbHostError.protocolViolation(
+      throw IosUsbError.protocolViolation(
         "Unknown USB frame type \(frame.type).")
     }
   }
@@ -285,14 +266,14 @@ final class UsbHostSession {
     let fileName = try requiredString(header, "fileName")
     let totalBytes = try requiredInt64(header, "totalBytes")
     guard totalBytes >= 0 else {
-      throw UsbHostError.protocolViolation("Invalid file length.")
+      throw IosUsbError.protocolViolation("Invalid file length.")
     }
     let relativePath = (header["destinationPath"] as? String) ?? fileName
     let root = URL(fileURLWithPath: configuration.incomingDirectory, isDirectory: true)
       .standardizedFileURL
     let requested = root.appendingPathComponent(relativePath).standardizedFileURL
     guard requested.path == root.path || requested.path.hasPrefix(root.path + "/") else {
-      throw UsbHostError.protocolViolation(
+      throw IosUsbError.protocolViolation(
         "Destination escapes the incoming directory.")
     }
     let destination = try collisionSafeDestination(requested)
@@ -327,15 +308,15 @@ final class UsbHostSession {
     let id = try requiredString(header, "transferId")
     if stateLock.withLock({ cancelled.contains(id) }) { return }
     guard let transfer = stateLock.withLock({ incoming[id] }) else {
-      throw UsbHostError.protocolViolation("Chunk received for unknown transfer \(id).")
+      throw IosUsbError.protocolViolation("Chunk received for unknown transfer \(id).")
     }
     let offset = try requiredInt64(header, "offset")
     guard offset == transfer.transferredBytes else {
-      throw UsbHostError.protocolViolation("Unexpected chunk offset for transfer \(id).")
+      throw IosUsbError.protocolViolation("Unexpected chunk offset for transfer \(id).")
     }
     try transfer.append(payload)
     guard transfer.transferredBytes <= transfer.totalBytes else {
-      throw UsbHostError.protocolViolation("Transfer exceeded its declared file length.")
+      throw IosUsbError.protocolViolation("Transfer exceeded its declared file length.")
     }
     emitProgress(
       id: id,
@@ -353,7 +334,7 @@ final class UsbHostSession {
     if stateLock.withLock({ cancelled.remove(id) != nil }) { return }
     let expectedHash = try requiredString(header, "sha256")
     guard let transfer = stateLock.withLock({ incoming.removeValue(forKey: id) }) else {
-      throw UsbHostError.protocolViolation("End received for unknown transfer \(id).")
+      throw IosUsbError.protocolViolation("End received for unknown transfer \(id).")
     }
     emitProgress(
       id: id,
@@ -367,11 +348,11 @@ final class UsbHostSession {
     do {
       let actualHash = try transfer.finish()
       guard transfer.transferredBytes == transfer.totalBytes else {
-        throw UsbHostError.protocolViolation(
+        throw IosUsbError.protocolViolation(
           "Received file length does not match its manifest.")
       }
       guard actualHash.caseInsensitiveCompare(expectedHash) == .orderedSame else {
-        throw UsbHostError.protocolViolation(
+        throw IosUsbError.protocolViolation(
           "SHA-256 mismatch for \(transfer.fileName).")
       }
       let manager = FileManager.default
@@ -525,7 +506,7 @@ final class UsbHostSession {
   private func heartbeat() {
     guard isRunning else { return }
     let now = Self.nowMs()
-    let heartbeatState = stateLock.withLock { () -> (UsbHostError?, Bool) in
+    let heartbeatState = stateLock.withLock { () -> (IosUsbError?, Bool) in
       if active {
         if now - lastPeerHeartbeatMs > Int64(configuration.peerTimeoutMs) {
           return (.transport("The USB peer stopped responding."), false)
@@ -535,7 +516,7 @@ final class UsbHostSession {
         return (nil, true)
       }
       let error = now - startedAtMs > Int64(configuration.peerTimeoutMs)
-        ? UsbHostError.transport("The mobile USB handshake timed out.")
+        ? IosUsbError.transport("The mobile USB handshake timed out.")
         : nil
       return (error, false)
     }
@@ -567,7 +548,7 @@ final class UsbHostSession {
     let headerData = try JSONSerialization.data(withJSONObject: header)
     guard headerData.count <= UsbWireProtocol.maxHeaderBytes,
           payload.count <= UsbWireProtocol.maxPayloadBytes else {
-      throw UsbHostError.protocolViolation("USB frame is too large.")
+      throw IosUsbError.protocolViolation("USB frame is too large.")
     }
     var frame = Data()
     frame.appendBigEndian(UsbWireProtocol.magic)
@@ -599,10 +580,10 @@ final class UsbHostSession {
     let prefix = try readExactly(18)
     let magic = prefix.uint32(at: 0)
     guard magic == UsbWireProtocol.magic else {
-      throw UsbHostError.protocolViolation("Invalid USB frame magic.")
+      throw IosUsbError.protocolViolation("Invalid USB frame magic.")
     }
     guard prefix[4] == UsbWireProtocol.version else {
-      throw UsbHostError.protocolViolation(
+      throw IosUsbError.protocolViolation(
         "Unsupported USB protocol version \(prefix[4]).")
     }
     let headerLength = Int(prefix.uint32(at: 6))
@@ -610,12 +591,12 @@ final class UsbHostSession {
     guard headerLength >= 0,
           headerLength <= UsbWireProtocol.maxHeaderBytes,
           payloadLength64 <= UInt64(UsbWireProtocol.maxPayloadBytes) else {
-      throw UsbHostError.protocolViolation("Invalid USB frame length.")
+      throw IosUsbError.protocolViolation("Invalid USB frame length.")
     }
     let headerData = try readExactly(headerLength)
     let object = try JSONSerialization.jsonObject(with: headerData)
     guard let header = object as? [String: Any] else {
-      throw UsbHostError.protocolViolation("USB frame header is not an object.")
+      throw IosUsbError.protocolViolation("USB frame header is not an object.")
     }
     let payload = try readExactly(Int(payloadLength64))
     let type = prefix[5]
@@ -656,7 +637,7 @@ final class UsbHostSession {
       inputBuffer = received
       inputBufferOffset = 0
     }
-    guard result.count == count else { throw UsbHostError.transport("USB session closed.") }
+    guard result.count == count else { throw IosUsbError.transport("USB session closed.") }
     return result
   }
 
@@ -666,7 +647,7 @@ final class UsbHostSession {
     switch configuration.overwritePolicy {
     case "replace": return requested
     case "reject":
-      throw UsbHostError.invalidTransfer(
+      throw IosUsbError.invalidTransfer(
         "Destination already exists: \(requested.lastPathComponent)")
     default:
       let folder = requested.deletingLastPathComponent()
@@ -684,14 +665,14 @@ final class UsbHostSession {
 
   private func requiredString(_ header: [String: Any], _ key: String) throws -> String {
     guard let value = header[key] as? String, !value.isEmpty else {
-      throw UsbHostError.protocolViolation("Missing frame field \(key).")
+      throw IosUsbError.protocolViolation("Missing frame field \(key).")
     }
     return value
   }
 
   private func requiredInt64(_ header: [String: Any], _ key: String) throws -> Int64 {
     guard let value = header[key] as? NSNumber else {
-      throw UsbHostError.protocolViolation("Missing numeric frame field \(key).")
+      throw IosUsbError.protocolViolation("Missing numeric frame field \(key).")
     }
     return value.int64Value
   }
@@ -756,7 +737,7 @@ final class UsbHostSession {
     var event: [String: Any?] = [
       "type": "connection",
       "state": state,
-      "localRole": "usbHost",
+      "localRole": "usbAccessory",
       "timestampMs": Self.nowMs(),
     ]
     if let peerId { event["peerId"] = peerId }
@@ -808,14 +789,6 @@ final class UsbHostSession {
 
   fileprivate static func nowMs() -> Int64 {
     Int64(Date().timeIntervalSince1970 * 1_000)
-  }
-}
-
-extension NSLock {
-  func withLock<T>(_ body: () throws -> T) rethrows -> T {
-    lock()
-    defer { unlock() }
-    return try body()
   }
 }
 

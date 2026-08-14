@@ -3,7 +3,9 @@ import UIKit
 
 public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
-  private var localRole = "automatic"
+  private lazy var transport = IosUsbLoopbackServer { [weak self] event in
+    self?.emit(event)
+  }
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = AresBridgePlugin()
@@ -18,39 +20,58 @@ public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandl
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-    switch call.method {
-    case "getCapabilities":
-      result([
-        "platform": "ios",
-        "isSupported": false,
-        "supportsUsbHost": false,
-        "supportsUsbAccessory": false,
-        "supportsBidirectionalTransfer": false,
-        "reason": "iOS does not expose the Android Open Accessory raw USB transport.",
-      ])
-    case "initialize":
-      if let arguments = call.arguments as? [String: Any] {
-        localRole = arguments["role"] as? String ?? "automatic"
+    do {
+      switch call.method {
+      case "getCapabilities":
+        result([
+          "platform": "ios",
+          "isSupported": true,
+          "supportsUsbHost": false,
+          "supportsUsbAccessory": true,
+          "supportsBidirectionalTransfer": true,
+          "reason":
+            "Requires a trusted physical USB connection and foreground USB Mode.",
+        ])
+      case "initialize":
+        guard let arguments = call.arguments as? [String: Any] else {
+          throw IosUsbError.invalidConfiguration(
+            "initialize expects a configuration map.")
+        }
+        try transport.initialize(arguments: arguments)
+        result(nil)
+      case "startListening":
+        try transport.startListening()
+        result(nil)
+      case "stopListening":
+        transport.stop()
+        result(nil)
+      case "sendFile":
+        guard let request = call.arguments as? [String: Any] else {
+          throw IosUsbError.invalidTransfer("sendFile expects a transfer map.")
+        }
+        result(try transport.sendFile(request))
+      case "sendFiles":
+        guard let requests = call.arguments as? [[String: Any]] else {
+          throw IosUsbError.invalidTransfer("sendFiles expects transfer maps.")
+        }
+        result(try transport.sendFiles(requests))
+      case "cancelTransfer":
+        guard let arguments = call.arguments as? [String: Any],
+              let transferId = arguments["transferId"] as? String,
+              !transferId.isEmpty else {
+          throw IosUsbError.invalidTransfer(
+            "cancelTransfer requires a transferId.")
+        }
+        transport.cancelTransfer(transferId)
+        result(nil)
+      case "dispose":
+        transport.stop()
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
       }
-      result(nil)
-    case "startListening":
-      emitConnection(
-        "failed",
-        message: "iOS does not expose the Android Open Accessory raw USB transport.")
-      result(error(
-        "unsupported_platform",
-        "iOS does not expose the Android Open Accessory raw USB transport."))
-    case "stopListening", "dispose":
-      emitConnection("stopped")
-      result(nil)
-    case "sendFile", "sendFiles":
-      result(error(
-        "unsupported_platform",
-        "Ares USB file transfer is unavailable on iOS."))
-    case "cancelTransfer":
-      result(nil)
-    default:
-      result(FlutterMethodNotImplemented)
+    } catch {
+      result(flutterError(error))
     }
   }
 
@@ -67,20 +88,25 @@ public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandl
     return nil
   }
 
-  private func emitConnection(_ state: String, message: String? = nil) {
-    var event: [String: Any] = [
-      "type": "connection",
-      "state": state,
-      "localRole": localRole,
-      "timestampMs": Int64(Date().timeIntervalSince1970 * 1000),
-    ]
-    if let message {
-      event["message"] = message
-    }
-    eventSink?(event)
+  private func emit(_ event: [String: Any?]) {
+    let platformEvent = event.compactMapValues { $0 }
+    DispatchQueue.main.async { [weak self] in self?.eventSink?(platformEvent) }
   }
 
-  private func error(_ code: String, _ message: String) -> FlutterError {
-    FlutterError(code: code, message: message, details: nil)
+  private func flutterError(_ error: Error) -> FlutterError {
+    let code: String
+    switch error {
+    case IosUsbError.invalidConfiguration: code = "invalid_configuration"
+    case IosUsbError.invalidTransfer: code = "invalid_transfer"
+    case IosUsbError.notConnected: code = "not_connected"
+    case IosUsbError.protocolViolation: code = "protocol_error"
+    default: code = "usb_transport_error"
+    }
+    return FlutterError(
+      code: code,
+      message: (error as? LocalizedError)?.errorDescription
+        ?? error.localizedDescription,
+      details: nil
+    )
   }
 }

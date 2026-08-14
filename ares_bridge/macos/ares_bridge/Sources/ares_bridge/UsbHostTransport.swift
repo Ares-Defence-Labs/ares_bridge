@@ -406,24 +406,60 @@ final class UsbHostTransport {
   private func bulkPipes(
     from interface: IOUSBHostInterface
   ) throws -> (input: IOUSBHostPipe, output: IOUSBHostPipe) {
-    var input: IOUSBHostPipe?
-    var output: IOUSBHostPipe?
-    for endpointNumber in 1...15 {
-      for address in [endpointNumber, endpointNumber | 0x80] {
-        guard let pipe = try? interface.copyPipe(withAddress: address) else { continue }
-        let descriptor = pipe.descriptors.pointee.descriptor
-        guard IOUSBGetEndpointType(withUnsafePointer(to: descriptor) { $0 })
-                == UInt8(kIOUSBEndpointTypeBulk.rawValue) else { continue }
-        if address & 0x80 == 0x80, input == nil { input = pipe }
-        if address & 0x80 == 0, output == nil { output = pipe }
+    do {
+      // IOUSBHost only creates pipes for the active alternate setting. The
+      // accessory interface can be published before that setting has been
+      // selected, so activate the setting before asking for its pipes.
+      let alternateSetting = Int(
+        interface.interfaceDescriptor.pointee.bAlternateSetting
+      )
+      try interface.selectAlternateSetting(alternateSetting)
+
+      // Pipe addresses are descriptor values, not a fixed endpoint range.
+      // Reading them from the active descriptor also avoids 30 failed
+      // copyPipe calls (and 30 IOUSBHost errors) on every discovery poll.
+      let configurationDescriptor = interface.configurationDescriptor
+      let interfaceDescriptor = interface.interfaceDescriptor
+      var endpointDescriptor = IOUSBGetNextEndpointDescriptor(
+        configurationDescriptor,
+        interfaceDescriptor,
+        nil
+      )
+      var input: IOUSBHostPipe?
+      var output: IOUSBHostPipe?
+
+      while let endpoint = endpointDescriptor {
+        if IOUSBGetEndpointType(endpoint)
+             == UInt8(kIOUSBEndpointTypeBulk.rawValue) {
+          let address = Int(IOUSBGetEndpointAddress(endpoint))
+          let pipe = try interface.copyPipe(withAddress: address)
+          if address & 0x80 == 0x80, input == nil { input = pipe }
+          if address & 0x80 == 0, output == nil { output = pipe }
+        }
+
+        let currentDescriptor = UnsafeRawPointer(endpoint)
+          .assumingMemoryBound(to: IOUSBDescriptorHeader.self)
+        endpointDescriptor = IOUSBGetNextEndpointDescriptor(
+          configurationDescriptor,
+          interfaceDescriptor,
+          currentDescriptor
+        )
       }
-    }
-    guard let input, let output else {
+
+      guard let input, let output else {
+        let descriptor = interfaceDescriptor.pointee
+        throw UsbHostError.transport(
+          "The Android accessory interface does not expose bidirectional " +
+            "bulk endpoints (interface \(descriptor.bInterfaceNumber), " +
+            "alternate \(descriptor.bAlternateSetting), " +
+            "endpoints \(descriptor.bNumEndpoints))."
+        )
+      }
+      return (input, output)
+    } catch {
       interface.destroy()
-      throw UsbHostError.transport(
-        "The Android accessory interface has no bidirectional bulk endpoints.")
+      throw error
     }
-    return (input, output)
   }
 
   private func services(matching: CFDictionary) -> [io_service_t] {

@@ -15,16 +15,18 @@ Every Flutter platform now registers the same method/event-channel API. Query
 | Platform | Role | Current transport |
 | --- | --- | --- |
 | Android | USB accessory | Implemented with `UsbManager`/`UsbAccessory` |
-| macOS | USB host | Implemented with Android Open Accessory and `IOUSBHost` |
+| macOS | USB host | Android Open Accessory via `IOUSBHost`; paired iOS devices via usbmuxd |
 | Windows | USB host | API registered; AOA/WinUSB transport not linked yet |
 | Linux | USB host | API registered; AOA/libusb transport not linked yet |
-| iOS | — | Explicitly unsupported by the OS API |
+| iOS | USB accessory | Foreground loopback listener reached through macOS usbmuxd |
 | Web | — | Explicitly unsupported as a portable background transport |
 
 Unsupported desktop host methods return `transport_unavailable` or
-`not_connected` rather than reporting false transfer success. Android and
-macOS perform real framed transfers once an Android Open Accessory session is
-established.
+`not_connected` rather than reporting false transfer success. Android uses
+Android Open Accessory. iOS uses a loopback-only foreground listener that the
+macOS host reaches through the paired device's physical usbmuxd tunnel.
+The iOS path filters out network-attached devices and the mobile listener binds
+only to loopback, so application data remains on the physical USB cable.
 
 ## Usage
 
