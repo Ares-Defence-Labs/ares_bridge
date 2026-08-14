@@ -16,13 +16,13 @@ verification, and terminal acknowledgements behind platform-neutral streams.
 
 | Guide | Use it for |
 | --- | --- |
-| [Getting started](docs/getting-started.md) | Installation and a complete lifecycle example |
-| [API reference](docs/api-reference.md) | Every public type, method, field, and enum |
-| [Platform setup](docs/platform-setup.md) | Android, macOS, iOS, Windows, Linux, and web notes |
-| [Events and errors](docs/events-and-errors.md) | State transitions, terminal events, and error handling |
-| [Platform channel contract](docs/platform-channel-contract.md) | Native backend method and event schemas |
-| [Protocol and security](docs/protocol-and-security.md) | Wire frames, verification, filesystem safety, and trust boundary |
-| [Troubleshooting](docs/troubleshooting.md) | Symptoms, causes, and practical checks |
+| [Getting started](doc/getting-started.md) | Installation and a complete lifecycle example |
+| [API reference](doc/api-reference.md) | Every public type, method, field, and enum |
+| [Platform setup](doc/platform-setup.md) | Android, macOS, iOS, Windows, Linux, and web notes |
+| [Events and errors](doc/events-and-errors.md) | State transitions, terminal events, and error handling |
+| [Platform channel contract](doc/platform-channel-contract.md) | Native backend method and event schemas |
+| [Protocol and security](doc/protocol-and-security.md) | Wire frames, verification, filesystem safety, and trust boundary |
+| [Troubleshooting](doc/troubleshooting.md) | Symptoms, causes, and practical checks |
 
 Run `dart doc` in this directory for browsable HTML generated directly from
 the source-level API comments.
@@ -126,7 +126,7 @@ or `failedTransfers` for the terminal result.
 - iOS 13.0 or later
 - macOS 10.15.4 or later
 
-See [Platform setup](docs/platform-setup.md) before integrating a native build.
+See [Platform setup](doc/platform-setup.md) before integrating a native build.
 
 ## License
 

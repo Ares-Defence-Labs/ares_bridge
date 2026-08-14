@@ -5,7 +5,7 @@ Flutter applications.
 
 The Flutter package lives in [`ares_bridge/`](ares_bridge/). Start with the
 [package documentation](ares_bridge/README.md), then use the
-[documentation index](ares_bridge/docs/README.md) for setup, API reference,
+[documentation index](ares_bridge/doc/README.md) for setup, API reference,
 event semantics, protocol details, and troubleshooting.
 
 ## Platform status
@@ -37,5 +37,5 @@ if (capabilities.isSupported) {
 }
 ```
 
-See [Getting started](ares_bridge/docs/getting-started.md) for a complete,
+See [Getting started](ares_bridge/doc/getting-started.md) for a complete,
 production-ready lifecycle example.
