@@ -12,6 +12,8 @@ final class UsbHostTransport {
 
   private let eventHandler: EventHandler
   private let queue = DispatchQueue(label: "usb.bridge.macos.discovery")
+  private let controlLock = NSLock()
+  private var failureReportingEnabled = true
   private var configuration: UsbHostConfiguration?
   private var timer: DispatchSourceTimer?
   private var session: UsbHostSession?
@@ -27,6 +29,10 @@ final class UsbHostTransport {
 
   var isConnected: Bool {
     queue.sync { session?.isActive == true }
+  }
+
+  func setFailureReportingEnabled(_ enabled: Bool) {
+    controlLock.withLock { failureReportingEnabled = enabled }
   }
 
   func initialize(arguments: [String: Any]) throws {
@@ -135,6 +141,10 @@ final class UsbHostTransport {
               self.session = nil
               self.emitConnection("disconnected")
             }
+          },
+          shouldReportFailure: { [weak self] in
+            guard let self else { return false }
+            return self.controlLock.withLock { self.failureReportingEnabled }
           }
         )
         self.session = session

@@ -77,6 +77,7 @@ final class IosUsbSession {
   )
   private let writeLock = NSLock()
   private let stateLock = NSLock()
+  private let chunkAckCondition = NSCondition()
   private var heartbeatTimer: DispatchSourceTimer?
   private var running = true
   private var active = false
@@ -88,6 +89,8 @@ final class IosUsbSession {
   private var incoming: [String: IncomingTransfer] = [:]
   private var outgoing: [String: OutgoingTransfer] = [:]
   private var cancelled: Set<String> = []
+  private var peerSupportsChunkAcknowledgements = false
+  private var acknowledgedOffsets: [String: Int64] = [:]
   // Bulk USB transfers are packet/transaction based. A peer write can contain
   // more bytes than the protocol field currently being decoded, so the host
   // must submit a sufficiently large request and retain the surplus.
@@ -95,6 +98,7 @@ final class IosUsbSession {
   private var inputBufferOffset = 0
   private static let maximumFrameBytes =
     18 + UsbWireProtocol.maxHeaderBytes + UsbWireProtocol.maxPayloadBytes
+  private static let chunkAcknowledgementWindow = 4
 
   init(
     socket descriptor: Int32,
@@ -131,6 +135,7 @@ final class IosUsbSession {
         "peerId": configuration.localPeerId,
         "peerName": configuration.localPeerName,
         "sessionId": sessionId,
+        "protocolCapabilities": ["chunkAcknowledgements"],
       ])
       try writeFrame(type: UsbWireProtocol.ready, header: [:])
     } catch {
@@ -180,6 +185,7 @@ final class IosUsbSession {
       incoming.removeValue(forKey: transferId)?.abort()
       outgoing.removeValue(forKey: transferId)
     }
+    clearChunkAcknowledgement(transferId)
   }
 
   func close() {
@@ -193,6 +199,10 @@ final class IosUsbSession {
     heartbeatTimer?.cancel()
     heartbeatTimer = nil
     byteTransport.close()
+    chunkAckCondition.lock()
+    acknowledgedOffsets.removeAll()
+    chunkAckCondition.broadcast()
+    chunkAckCondition.unlock()
     stateLock.withLock {
       incoming.values.forEach { $0.abort() }
       incoming.removeAll()
@@ -220,7 +230,12 @@ final class IosUsbSession {
       // The host can send its startup HELLO and another HELLO in response to the
       // host handshake. A duplicate HELLO after READY must not downgrade the
       // product UI from active back to connecting.
-      let connectionState = stateLock.withLock { active ? "active" : "peerReady" }
+      let capabilities = frame.header["protocolCapabilities"] as? [String] ?? []
+      let connectionState = stateLock.withLock { () -> String in
+        peerSupportsChunkAcknowledgements = capabilities.contains(
+          "chunkAcknowledgements")
+        return active ? "active" : "peerReady"
+      }
       emitConnection(
         connectionState,
         peerId: frame.header["peerId"] as? String,
@@ -253,6 +268,8 @@ final class IosUsbSession {
       try handleFileEnd(frame.header)
     case UsbWireProtocol.fileAcknowledgement:
       handleFileAcknowledgement(frame.header)
+    case UsbWireProtocol.fileChunkAcknowledgement:
+      handleFileChunkAcknowledgement(frame.header)
     case UsbWireProtocol.fileError:
       handleFileError(frame.header)
     default:
@@ -327,6 +344,16 @@ final class IosUsbSession {
       stage: "transferring",
       startedAtMs: transfer.startedAtMs
     )
+    let acknowledgementWindowBytes = Int64(
+      configuration.chunkSizeBytes * Self.chunkAcknowledgementWindow)
+    if stateLock.withLock({ peerSupportsChunkAcknowledgements }),
+       transfer.transferredBytes == transfer.totalBytes ||
+         transfer.transferredBytes % acknowledgementWindowBytes == 0 {
+      try writeFrame(type: UsbWireProtocol.fileChunkAcknowledgement, header: [
+        "transferId": id,
+        "nextOffset": transfer.transferredBytes,
+      ])
+    }
   }
 
   private func handleFileEnd(_ header: [String: Any]) throws {
@@ -400,6 +427,7 @@ final class IosUsbSession {
           let transfer = stateLock.withLock({ outgoing.removeValue(forKey: id) }) else {
       return
     }
+    clearChunkAcknowledgement(id)
     var event: [String: Any?] = [
       "type": "transferCompleted",
       "transferId": id,
@@ -414,8 +442,20 @@ final class IosUsbSession {
     emit(event)
   }
 
+  private func handleFileChunkAcknowledgement(_ header: [String: Any]) {
+    guard let id = header["transferId"] as? String,
+          let nextOffset = (header["nextOffset"] as? NSNumber)?.int64Value else {
+      return
+    }
+    chunkAckCondition.lock()
+    acknowledgedOffsets[id] = max(acknowledgedOffsets[id] ?? 0, nextOffset)
+    chunkAckCondition.broadcast()
+    chunkAckCondition.unlock()
+  }
+
   private func handleFileError(_ header: [String: Any]) {
     guard let id = header["transferId"] as? String else { return }
+    clearChunkAcknowledgement(id)
     let outgoingTransfer = stateLock.withLock { () -> OutgoingTransfer? in
       let transfer = outgoing.removeValue(forKey: id)
       incoming.removeValue(forKey: id)?.abort()
@@ -466,6 +506,13 @@ final class IosUsbSession {
           "offset": transferred,
         ], payload: chunk)
         transferred += Int64(chunk.count)
+        let acknowledgementWindowBytes = Int64(
+          configuration.chunkSizeBytes * Self.chunkAcknowledgementWindow)
+        if stateLock.withLock({ peerSupportsChunkAcknowledgements }),
+           transferred == transfer.totalBytes ||
+             transferred % acknowledgementWindowBytes == 0 {
+          try waitForChunkAcknowledgement(id: id, nextOffset: transferred)
+        }
         emitProgress(
           id: id,
           direction: "outgoing",
@@ -491,6 +538,7 @@ final class IosUsbSession {
         startedAtMs: transfer.startedAtMs
       )
     } catch {
+      clearChunkAcknowledgement(id)
       _ = stateLock.withLock { outgoing.removeValue(forKey: id) }
       emitFailure(
         id: id,
@@ -501,6 +549,27 @@ final class IosUsbSession {
         recoverable: true
       )
     }
+  }
+
+  private func waitForChunkAcknowledgement(id: String, nextOffset: Int64) throws {
+    let deadline = Date().addingTimeInterval(
+      TimeInterval(configuration.peerTimeoutMs) / 1_000)
+    chunkAckCondition.lock()
+    defer { chunkAckCondition.unlock() }
+    while (acknowledgedOffsets[id] ?? 0) < nextOffset, isRunning {
+      guard chunkAckCondition.wait(until: deadline) else {
+        throw IosUsbError.transport(
+          "The Mac did not acknowledge the file chunk in time.")
+      }
+    }
+    guard isRunning else { throw IosUsbError.transport("USB session closed.") }
+  }
+
+  private func clearChunkAcknowledgement(_ id: String) {
+    chunkAckCondition.lock()
+    acknowledgedOffsets.removeValue(forKey: id)
+    chunkAckCondition.broadcast()
+    chunkAckCondition.unlock()
   }
 
   private func heartbeat() {
@@ -748,7 +817,7 @@ final class IosUsbSession {
 
   private func failAndDisconnect(_ error: Error) {
     let shouldReport = stateLock.withLock { () -> Bool in
-      guard !disconnectReported else { return false }
+      guard running, !disconnectReported else { return false }
       disconnectReported = true
       return true
     }

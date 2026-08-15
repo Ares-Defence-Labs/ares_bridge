@@ -3,6 +3,12 @@ import FlutterMacOS
 
 public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
+  /// Flutter invokes method-channel handlers on the platform thread. USB
+  /// discovery and session queues can briefly wait on I/O, so never perform
+  /// those calls on the UI thread.
+  private let methodQueue = DispatchQueue(
+    label: "com.aresdefencelabs.aresbridge.methods",
+    qos: .userInitiated)
   private lazy var transport = CompositeUsbHostTransport { [weak self] event in
     self?.emit(event)
   }
@@ -20,39 +26,42 @@ public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandl
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-    do {
-      switch call.method {
+    methodQueue.async { [weak self] in
+      guard let self else { return }
+      do {
+        let response: Any?
+        switch call.method {
       case "getCapabilities":
-        result([
+        response = [
           "platform": "macos",
           "isSupported": true,
           "supportsUsbHost": true,
           "supportsUsbAccessory": false,
           "supportsBidirectionalTransfer": true,
-        ])
+        ]
       case "initialize":
         guard let arguments = call.arguments as? [String: Any] else {
           throw UsbHostError.invalidConfiguration(
             "initialize expects a configuration map.")
         }
         try transport.initialize(arguments: arguments)
-        result(nil)
+        response = nil
       case "startListening":
         try transport.startListening()
-        result(nil)
+        response = nil
       case "stopListening":
         transport.stop()
-        result(nil)
+        response = nil
       case "sendFile":
         guard let request = call.arguments as? [String: Any] else {
           throw UsbHostError.invalidTransfer("sendFile expects a transfer map.")
         }
-        result(try transport.sendFile(request))
+        response = try transport.sendFile(request)
       case "sendFiles":
         guard let requests = call.arguments as? [[String: Any]] else {
           throw UsbHostError.invalidTransfer("sendFiles expects transfer maps.")
         }
-        result(try transport.sendFiles(requests))
+        response = try transport.sendFiles(requests)
       case "cancelTransfer":
         guard let arguments = call.arguments as? [String: Any],
               let transferId = arguments["transferId"] as? String,
@@ -60,15 +69,18 @@ public final class AresBridgePlugin: NSObject, FlutterPlugin, FlutterStreamHandl
           throw UsbHostError.invalidTransfer("cancelTransfer requires a transferId.")
         }
         transport.cancelTransfer(transferId)
-        result(nil)
+        response = nil
       case "dispose":
         transport.stop()
-        result(nil)
+        response = nil
       default:
-        result(FlutterMethodNotImplemented)
+        response = FlutterMethodNotImplemented
+        }
+        DispatchQueue.main.async { result(response) }
+      } catch {
+        let platformError = self.flutterError(error)
+        DispatchQueue.main.async { result(platformError) }
       }
-    } catch {
-      result(flutterError(error))
     }
   }
 

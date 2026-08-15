@@ -84,4 +84,5 @@ enum UsbWireProtocol {
   static let fileEnd: UInt8 = 18
   static let fileAcknowledgement: UInt8 = 19
   static let fileError: UInt8 = 20
+  static let fileChunkAcknowledgement: UInt8 = 21
 }

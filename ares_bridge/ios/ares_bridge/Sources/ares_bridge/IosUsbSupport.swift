@@ -178,6 +178,7 @@ enum UsbWireProtocol {
   static let fileEnd: UInt8 = 18
   static let fileAcknowledgement: UInt8 = 19
   static let fileError: UInt8 = 20
+  static let fileChunkAcknowledgement: UInt8 = 21
 }
 
 extension NSLock {
@@ -220,6 +221,7 @@ final class IosUsbLoopbackServer {
 
   deinit {
     lifecycleObservers.forEach(NotificationCenter.default.removeObserver)
+    setIdleTimerDisabled(false)
   }
 
   func initialize(arguments: [String: Any]) throws {
@@ -229,6 +231,11 @@ final class IosUsbLoopbackServer {
       withIntermediateDirectories: true
     )
     queue.sync { configuration = parsed }
+    NSLog(
+      "[AresBridge][iOS] initialized peer=%@ incoming=%@",
+      parsed.localPeerName,
+      parsed.incomingDirectory
+    )
   }
 
   func startListening() throws {
@@ -239,6 +246,8 @@ final class IosUsbLoopbackServer {
       listeningRequested = true
       guard listenerDescriptor < 0 else { return }
       try openListener()
+      setIdleTimerDisabled(true)
+      NSLog("[AresBridge][iOS] listening on cable tunnel port %d", Self.port)
       emitConnection(
         "listening",
         message: "Connect this iPhone to a trusted Mac with a USB cable."
@@ -250,6 +259,7 @@ final class IosUsbLoopbackServer {
     queue.sync {
       listeningRequested = false
       closeListenerAndSession()
+      setIdleTimerDisabled(false)
       emitConnection("stopped")
     }
   }
@@ -334,6 +344,7 @@ final class IosUsbLoopbackServer {
       }
     }
     guard accepted >= 0 else { return }
+    NSLog("[AresBridge][iOS] accepted usbmuxd tunnel")
     // Binding to loopback already excludes Wi-Fi and cellular. Check the peer
     // as a second cable-only guard before accepting the usbmuxd tunnel.
     guard peer.sin_family == sa_family_t(AF_INET),
@@ -366,6 +377,7 @@ final class IosUsbLoopbackServer {
   private func suspendForBackground() {
     guard listeningRequested else { return }
     closeListenerAndSession()
+    setIdleTimerDisabled(false)
     emitConnection(
       "disconnected",
       message: "Keep USB Mode open in the foreground during cable transfer."
@@ -376,6 +388,7 @@ final class IosUsbLoopbackServer {
     guard listeningRequested, listenerDescriptor < 0 else { return }
     do {
       try openListener()
+      setIdleTimerDisabled(true)
       emitConnection("listening")
     } catch {
       emitConnection("failed", message: friendly(error))
@@ -391,6 +404,16 @@ final class IosUsbLoopbackServer {
     }
     session?.close()
     session = nil
+  }
+
+  /// A cable transfer must not be interrupted by the phone's normal auto-lock
+  /// timer. iOS suspends the app and closes the usbmuxd tunnel when the screen
+  /// locks, so keep the display awake only while foreground USB Mode is
+  /// actively listening and restore the system default on exit/background.
+  private func setIdleTimerDisabled(_ disabled: Bool) {
+    DispatchQueue.main.async {
+      UIApplication.shared.isIdleTimerDisabled = disabled
+    }
   }
 
   private func emitConnection(_ state: String, message: String? = nil) {

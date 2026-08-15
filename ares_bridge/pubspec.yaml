@@ -1,6 +1,6 @@
 name: ares_bridge
 description: Flutter plugin for USB peer discovery and checksum-verified bidirectional file transfer for all platforms.
-version: 0.0.1
+version: 0.0.2
 homepage: https://aresdefencelabs.com/
 repository: https://github.com/Ares-Defence-Labs/ares_bridge
 issue_tracker: https://github.com/Ares-Defence-Labs/ares_bridge/issues
